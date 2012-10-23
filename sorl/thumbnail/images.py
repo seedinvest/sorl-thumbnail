@@ -10,7 +10,7 @@ from sorl.thumbnail.conf import settings
 from sorl.thumbnail.helpers import ThumbnailError, tokey, get_module_class
 from sorl.thumbnail import default
 from sorl.thumbnail.parsers import parse_geometry
-
+from django.conf import settings
 
 url_pat = re.compile(r'^(https?|ftp):\/\/')
 
@@ -115,7 +115,8 @@ class ImageFile(BaseImageFile):
 
     @property
     def url(self):
-        return self.storage.url(self.name)
+        return settings.S3_UPLOAD_URL + self.name
+        #return self.storage.url(self.name)
 
     def read(self):
         return self.storage.open(self.name).read()
