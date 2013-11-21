@@ -30,13 +30,16 @@ class Engine(EngineBase):
         image['options']['quality'] = options['quality']
         if 'blur' in options:
             image['options']['blur'] = options['blur']
-        image['options']['flatten'] = True
         args = settings.THUMBNAIL_CONVERT.split(' ')
         args.append(image['source']+'[0]')
         for k, v in image['options'].iteritems():
             args.append('-%s' % k)
             if v is not None:
                 args.append('%s' % v)
+
+        if settings.THUMBNAIL_FLATTEN:
+            args.append('-flatten')
+
         args.append(out)
         args = map(smart_str, args)
         p = Popen(args)
