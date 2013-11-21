@@ -30,6 +30,7 @@ class Engine(EngineBase):
         image['options']['quality'] = options['quality']
         if 'blur' in options:
             image['options']['blur'] = options['blur']
+        image['options']['flatten'] = True
         args = settings.THUMBNAIL_CONVERT.split(' ')
         args.append(image['source']+'[0]')
         for k, v in image['options'].iteritems():
