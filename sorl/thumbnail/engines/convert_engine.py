@@ -28,6 +28,7 @@ class Engine(EngineBase):
             ):
             image['options']['interlace'] = 'line'
         image['options']['quality'] = options['quality']
+
         if 'blur' in options:
             image['options']['blur'] = options['blur']
         args = settings.THUMBNAIL_CONVERT.split(' ')
@@ -36,6 +37,10 @@ class Engine(EngineBase):
             args.append('-%s' % k)
             if v is not None:
                 args.append('%s' % v)
+
+        if 'background' in options or getattr(settings, 'THUMBNAIL_BACKGROUND', None):
+            args.append('-background')
+            args.append(options.get('background', getattr(settings, 'THUMBNAIL_BACKGROUND', 'none')))
 
         flatten = "on"
         if 'flatten' in options:
