@@ -29,8 +29,6 @@ class Engine(EngineBase):
             image['options']['interlace'] = 'line'
         image['options']['quality'] = options['quality']
 
-        if 'blur' in options:
-            image['options']['blur'] = options['blur']
         args = settings.THUMBNAIL_CONVERT.split(' ')
         args.append(image['source']+'[0]')
         for k, v in image['options'].iteritems():
@@ -162,3 +160,6 @@ class Engine(EngineBase):
         image['size'] = (width, height) # update image size
         return image
 
+    def _blur(self, image, blur):
+        image['options']['blur'] = "%sx%s" % (settings.THUMBNAIL_BLUR, blur)
+        return image
