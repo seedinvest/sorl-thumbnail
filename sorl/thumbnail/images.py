@@ -2,13 +2,16 @@ import re
 
 from django.core.files.base import File, ContentFile
 from django.core.files.storage import Storage, default_storage
-
-from django.utils.functional import LazyObject
+from django.utils.functional import LazyObject, empty
 
 from sorl.thumbnail import default
-from sorl.thumbnail.compat import json, urlopen, URLError, force_unicode
 from sorl.thumbnail.conf import settings
-from sorl.thumbnail.helpers import ThumbnailError, tokey, get_module_class, deserialize
+
+from sorl.thumbnail.compat import json, urlopen, urlparse, urlsplit, \
+    quote, quote_plus, \
+    URLError, force_unicode, encode
+from sorl.thumbnail.helpers import ThumbnailError, \
+    tokey, get_module_class, deserialize
 from sorl.thumbnail.parsers import parse_geometry
 from django.conf import settings
 
@@ -131,8 +134,11 @@ class ImageFile(BaseImageFile):
     def write(self, content):
         if not isinstance(content, File):
             content = ContentFile(content)
+
         self._size = None
-        return self.storage.save(self.name, content)
+        self.name = self.storage.save(self.name, content)
+
+        return self.name
 
     def delete(self):
         return self.storage.delete(self.name)
@@ -141,7 +147,8 @@ class ImageFile(BaseImageFile):
         if isinstance(self.storage, LazyObject):
             # if storage is wrapped in a lazy object we need to get the real
             # thing.
-            self.storage._setup()
+            if self.storage._wrapped is empty:
+                self.storage._setup()
             cls = self.storage._wrapped.__class__
         else:
             cls = self.storage.__class__
@@ -173,8 +180,24 @@ class DummyImageFile(BaseImageFile):
 
 
 class UrlStorage(Storage):
+    def normalize_url(self, url, charset='utf-8'):
+        url = encode(url, charset, 'ignore')
+        scheme, netloc, path, qs, anchor = urlsplit(url)
+
+        # Encode to utf8 to prevent urllib KeyError
+        path = encode(path, charset, 'ignore')
+
+        path = quote(path, '/%')
+        qs = quote_plus(qs, ':&%=')
+
+        return urlparse.urlunsplit((scheme, netloc, path, qs, anchor))
+
     def open(self, name, mode='rb'):
-        return urlopen(name, None, settings.THUMBNAIL_URL_TIMEOUT)
+        return urlopen(
+            self.normalize_url(name),
+            None,
+            settings.THUMBNAIL_URL_TIMEOUT
+        )
 
     def exists(self, name):
         try:

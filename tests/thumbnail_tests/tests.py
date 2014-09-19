@@ -1,15 +1,23 @@
-#coding=utf-8
-import os
-import re
+# coding=utf-8
+from __future__ import unicode_literals, division
+
 import sys
 import logging
+from subprocess import Popen, PIPE
+
 import shutil
+import os
+import re
+from os.path import join as pjoin
 from PIL import Image
+from django.utils.six import StringIO
+from django.core import management
 from django.core.files.storage import default_storage
 from django.template.loader import render_to_string
 from django.test.client import Client
 from django.test import TestCase
-from os.path import join as pjoin
+from django.test.utils import override_settings
+
 from sorl.thumbnail import default, get_thumbnail, delete
 from sorl.thumbnail.conf import settings
 from sorl.thumbnail.engines.pil_engine import Engine as PILEngine
@@ -18,76 +26,137 @@ from sorl.thumbnail.images import ImageFile
 from sorl.thumbnail.log import ThumbnailLogHandler
 from sorl.thumbnail.parsers import parse_crop, parse_geometry
 from sorl.thumbnail.templatetags.thumbnail import margin
-from subprocess import Popen, PIPE
-from thumbnail_tests.models import Item
-from thumbnail_tests.storage import slog
-from thumbnail_tests.compat import unittest, PY3
+from sorl.thumbnail.base import ThumbnailBackend
+from .models import Item
+from .storage import MockLoggingHandler
+from .compat import unittest
+from .utils import same_open_fd_count, override_custom_settings
 
-from unittest import skip, skipIf
+
+skip = unittest.skip
+skipIf = unittest.skipIf
 
 handler = ThumbnailLogHandler()
 handler.setLevel(logging.ERROR)
 logging.getLogger('sorl.thumbnail').addHandler(handler)
 
 
-class StorageTestCase(unittest.TestCase):
+DATA_DIR = pjoin(settings.MEDIA_ROOT, 'data')
+
+
+class BaseStorageTestCase(unittest.TestCase):
+    im = None
+
     def setUp(self):
-        name = 'org.jpg'
         os.makedirs(settings.MEDIA_ROOT)
-        fn = pjoin(settings.MEDIA_ROOT, name)
+        fn = pjoin(settings.MEDIA_ROOT, self.name)
         Image.new('L', (100, 100)).save(fn)
-        self.im = ImageFile(name)
+        self.im = ImageFile(self.name)
 
-    def test_a_new(self):
-        slog.start_log()
-        get_thumbnail(self.im, '50x50')
-        log = slog.stop_log()
-        actions = [
-            'open: org.jpg',  # open the original for thumbnailing
-            'save: test/cache/d0/cb/d0cbb1255c87524a0d66ffed9851ded9.jpg',  # save the file
-            'get_available_name: test/cache/d0/cb/d0cbb1255c87524a0d66ffed9851ded9.jpg',  # check for filename
-            'exists: test/cache/d0/cb/d0cbb1255c87524a0d66ffed9851ded9.jpg',  # called by get_available_name
-        ]
-        self.assertEqual(log, actions)
-
-    def test_b_cached(self):
-        slog.start_log()
-        get_thumbnail(self.im, '50x50')
-        log = slog.stop_log()
-        self.assertEqual(log, [])  # now this should all be in cache
-
-    def test_c_safe_methods(self):
-        slog.start_log()
-        im = default.kvstore.get(self.im)
-        im.url, im.x, im.y
-        log = slog.stop_log()
-        self.assertEqual(log, [])
+        logger = logging.getLogger('slog')
+        logger.setLevel(logging.DEBUG)
+        handler = MockLoggingHandler(level=logging.DEBUG)
+        logger.addHandler(handler)
+        self.log = handler.messages['debug']
 
     def tearDown(self):
         shutil.rmtree(settings.MEDIA_ROOT)
 
 
+class StorageTestCase(BaseStorageTestCase):
+    name = 'org.jpg'
+
+    def test_a_new(self):
+        get_thumbnail(self.im, '50x50')
+        actions = [
+            'open: org.jpg',  # open the original for thumbnailing
+            # save the file
+            'save: test/cache/ca/1a/ca1afb02b7250c125d8830c0e8a492ad.jpg',
+            # check for filename
+            'get_available_name: test/cache/ca/1a/ca1afb02b7250c125d8830c0e8a492ad.jpg',
+            # called by get_available_name
+            'exists: test/cache/ca/1a/ca1afb02b7250c125d8830c0e8a492ad.jpg',
+        ]
+        self.assertEqual(self.log, actions)
+
+    def test_b_cached(self):
+        get_thumbnail(self.im, '50x50')
+        self.assertEqual(self.log, [])  # now this should all be in cache
+
+    def test_c_safe_methods(self):
+        im = default.kvstore.get(self.im)
+        im.url, im.x, im.y
+        self.assertEqual(self.log, [])
+
+
+class AlternativeResolutionsTest(BaseStorageTestCase):
+    name = 'retina.jpg'
+
+    def setUp(self):
+        settings.THUMBNAIL_ALTERNATIVE_RESOLUTIONS = [1.5, 2]
+        super(AlternativeResolutionsTest, self).setUp()
+
+    def tearDown(self):
+        super(AlternativeResolutionsTest, self).tearDown()
+        settings.THUMBNAIL_ALTERNATIVE_RESOLUTIONS = []
+
+    def test_retina(self):
+        get_thumbnail(self.im, '50x50')
+
+        actions = [
+            # save regular resolution, same as in StorageTestCase
+            'open: retina.jpg',
+            'save: test/cache/19/10/1910dc350bbe9ee55fd9d8d3d5e38e19.jpg',
+            'get_available_name: test/cache/19/10/1910dc350bbe9ee55fd9d8d3d5e38e19.jpg',
+            'exists: test/cache/19/10/1910dc350bbe9ee55fd9d8d3d5e38e19.jpg',
+
+            # save the 1.5x resolution version
+            'save: test/cache/19/10/1910dc350bbe9ee55fd9d8d3d5e38e19@1.5x.jpg',
+            'get_available_name: test/cache/19/10/1910dc350bbe9ee55fd9d8d3d5e38e19@1.5x.jpg',
+            'exists: test/cache/19/10/1910dc350bbe9ee55fd9d8d3d5e38e19@1.5x.jpg',
+
+            # save the 2x resolution version
+            'save: test/cache/19/10/1910dc350bbe9ee55fd9d8d3d5e38e19@2x.jpg',
+            'get_available_name: test/cache/19/10/1910dc350bbe9ee55fd9d8d3d5e38e19@2x.jpg',
+            'exists: test/cache/19/10/1910dc350bbe9ee55fd9d8d3d5e38e19@2x.jpg'
+        ]
+        self.assertEqual(self.log, actions)
+
+        with open(pjoin(settings.MEDIA_ROOT, 'test/cache/19/10/1910dc350bbe9ee55fd9d8d3d5e38e19@1.5x.jpg')) as fp:
+            engine = PILEngine()
+            self.assertEqual(engine.get_image_size(engine.get_image(ImageFile(file_=fp))), (75, 75))
+
+
+class UrlStorageTestCase(unittest.TestCase):
+    def test_encode_utf8_filenames(self):
+        storage = get_module_class('sorl.thumbnail.images.UrlStorage')()
+        self.assertEqual(
+            storage.normalize_url('El jovencito emponzoñado de whisky, qué figura exhibe'),
+            'El%20jovencito%20emponzoado%20de%20whisky%2C%20qu%20figura%20exhibe'
+        )
+
+
 class ParsersTestCase(unittest.TestCase):
-    def testAliasCrop(self):
+    def test_alias_crop(self):
         crop = parse_crop('center', (500, 500), (400, 400))
         self.assertEqual(crop, (50, 50))
         crop = parse_crop('right', (500, 500), (400, 400))
         self.assertEqual(crop, (100, 50))
 
-    def testPercentCrop(self):
+    def test_percent_crop(self):
         crop = parse_crop('50% 0%', (500, 500), (400, 400))
         self.assertEqual(crop, (50, 0))
         crop = parse_crop('10% 80%', (500, 500), (400, 400))
         self.assertEqual(crop, (10, 80))
 
-    def testPxCrop(self):
+    def test_px_crop(self):
         crop = parse_crop('200px 33px', (500, 500), (400, 400))
         self.assertEqual(crop, (100, 33))
 
-    def testBadCrop(self):
+    def test_bad_crop(self):
         self.assertRaises(ThumbnailError, parse_crop, '-200px', (500, 500), (400, 400))
 
-    def testGeometry(self):
+    def test_geometry(self):
         g = parse_geometry('222x30')
         self.assertEqual(g, (222, 30))
         g = parse_geometry('222')
@@ -97,17 +166,25 @@ class ParsersTestCase(unittest.TestCase):
 
 
 class SimpleTestCaseBase(unittest.TestCase):
+    backend = None
+    engine = None
+    kvstore = None
+
     def setUp(self):
         self.backend = get_module_class(settings.THUMBNAIL_BACKEND)()
         self.engine = get_module_class(settings.THUMBNAIL_ENGINE)()
         self.kvstore = get_module_class(settings.THUMBNAIL_KVSTORE)()
+
         if not os.path.exists(settings.MEDIA_ROOT):
             os.makedirs(settings.MEDIA_ROOT)
+            shutil.copytree(settings.DATA_ROOT, DATA_DIR)
+
         dims = [
             (500, 500),
             (100, 100),
             (200, 100),
         ]
+
         for dim in dims:
             name = '%sx%s.jpg' % dim
             fn = pjoin(settings.MEDIA_ROOT, name)
@@ -120,35 +197,45 @@ class SimpleTestCaseBase(unittest.TestCase):
 
 
 class SimpleTestCase(SimpleTestCaseBase):
-    def testSimple(self):
+    def test_simple(self):
         item = Item.objects.get(image='500x500.jpg')
+
         t = self.backend.get_thumbnail(item.image, '400x300', crop='center')
+
         self.assertEqual(t.x, 400)
         self.assertEqual(t.y, 300)
+
         t = self.backend.get_thumbnail(item.image, '1200x900', crop='13% 89%')
+
         self.assertEqual(t.x, 1200)
         self.assertEqual(t.y, 900)
 
-    def testUpscale(self):
+    def test_upscale(self):
         item = Item.objects.get(image='100x100.jpg')
+
         t = self.backend.get_thumbnail(item.image, '400x300', upscale=False)
+
         self.assertEqual(t.x, 100)
         self.assertEqual(t.y, 100)
+
         t = self.backend.get_thumbnail(item.image, '400x300', upscale=True)
+
         self.assertEqual(t.x, 300)
         self.assertEqual(t.y, 300)
 
-    def testUpscaleCrop(self):
+    def test_upscale_and_crop(self):
         item = Item.objects.get(image='200x100.jpg')
+
         t = self.backend.get_thumbnail(item.image, '400x300', crop='center', upscale=False)
+
         self.assertEqual(t.x, 200)
         self.assertEqual(t.y, 100)
+
         t = self.backend.get_thumbnail(item.image, '400x300', crop='center', upscale=True)
         self.assertEqual(t.x, 400)
         self.assertEqual(t.y, 300)
 
-    @skip('stall')
-    def testKVStore(self):
+    def test_kvstore(self):
         im = ImageFile(Item.objects.get(image='500x500.jpg').image)
         self.kvstore.delete_thumbnails(im)
         th1 = self.backend.get_thumbnail(im, '50')
@@ -157,22 +244,21 @@ class SimpleTestCase(SimpleTestCaseBase):
         self.assertEqual(
             set([th1.key, th2.key, th3.key]),
             set(self.kvstore._get(im.key, identity='thumbnails'))
-            )
+        )
         self.kvstore.delete_thumbnails(im)
         self.assertEqual(
             None,
             self.kvstore._get(im.key, identity='thumbnails')
-            )
+        )
 
-    @skip('stall')
-    def testIsPortrait(self):
+    def test_is_portrait(self):
         im = ImageFile(Item.objects.get(image='500x500.jpg').image)
         th = self.backend.get_thumbnail(im, '50x200', crop='center')
         self.assertEqual(th.is_portrait(), True)
         th = self.backend.get_thumbnail(im, '500x2', crop='center')
         self.assertEqual(th.is_portrait(), False)
 
-    def testMargin(self):
+    def test_margin(self):
         im = ImageFile(Item.objects.get(image='500x500.jpg').image)
         self.assertEqual(margin(im, '1000x1000'), '250px 250px 250px 250px')
         self.assertEqual(margin(im, '800x1000'), '250px 150px 250px 150px')
@@ -181,14 +267,13 @@ class SimpleTestCase(SimpleTestCaseBase):
         self.assertEqual(margin(im, '503x500'), '0px 2px 0px 1px')
         self.assertEqual(margin(im, '300x300'), '-100px -100px -100px -100px')
 
-    def testKVStoreGetSet(self):
+    def test_kvstore_get_and_set(self):
         im = ImageFile(Item.objects.get(image='500x500.jpg').image)
         self.kvstore.delete(im)
         self.assertEqual(self.kvstore.get(im), None)
         self.kvstore.set(im)
         self.assertEqual(im.size, [500, 500])
 
-    @skip('stall')
     def test_cleanup1(self):
         im = ImageFile(Item.objects.get(image='500x500.jpg').image)
         self.kvstore.delete_thumbnails(im)
@@ -202,7 +287,6 @@ class SimpleTestCase(SimpleTestCaseBase):
         self.assertEqual(self.kvstore.get(th), None)
         self.kvstore.delete(im)
 
-    @skip('stall')
     def test_cleanup2(self):
         self.kvstore.clear()
         im = ImageFile(Item.objects.get(image='500x500.jpg').image)
@@ -232,15 +316,15 @@ class SimpleTestCase(SimpleTestCaseBase):
         self.assertEqual(
             ImageFile('http://www.image.jpg').serialize_storage(),
             'sorl.thumbnail.images.UrlStorage',
-            )
+        )
         self.assertEqual(
             ImageFile('http://www.image.jpg', default.storage).serialize_storage(),
             'thumbnail_tests.storage.TestStorage',
-            )
+        )
         self.assertEqual(
             ImageFile('getit', default_storage).serialize_storage(),
             'thumbnail_tests.storage.TestStorage',
-            )
+        )
 
     @skipIf(sys.platform == 'darwin', 'quality is saved a different way on os x')
     def test_quality(self):
@@ -258,20 +342,22 @@ class SimpleTestCase(SimpleTestCaseBase):
         self.assertEqual(
             default.kvstore.get(im).serialize_storage(),
             'thumbnail_tests.storage.TestStorage',
-            )
+        )
         im = ImageFile('http://dummyimage.com/300x300/')
         default.kvstore.set(im)
         self.assertEqual(
             default.kvstore.get(im).serialize_storage(),
             'sorl.thumbnail.images.UrlStorage',
-            )
+        )
 
     def test_abspath(self):
         item = Item.objects.get(image='500x500.jpg')
         image = ImageFile(item.image.path)
+
         val = render_to_string('thumbnail20.html', {
             'image': image,
         }).strip()
+
         im = self.backend.get_thumbnail(image, '32x32', crop='center')
         self.assertEqual('<img src="%s">' % im.url, val)
 
@@ -289,40 +375,43 @@ class SimpleTestCase(SimpleTestCaseBase):
         val = render_to_string('htmlfilter.html', {
             'text': text,
         }).strip()
-        self.assertEqual('<img alt="A image!" src="/media/test/cache/df/d5/dfd560ae0c3a15a28b73306f34d1f6e0.jpg" />', val)
+        self.assertEqual('<img alt="A image!" src="/media/test/cache/2e/35/2e3517d8aa949728b1ee8b26c5a7bbc4.jpg" />',
+                         val)
 
     def test_markdown_filter(self):
         text = '![A image!](http://dummyimage.com/800x800)'
         val = render_to_string('markdownfilter.html', {
             'text': text,
         }).strip()
-        self.assertEqual('![A image!](/media/test/cache/df/d5/dfd560ae0c3a15a28b73306f34d1f6e0.jpg)', val)
+        self.assertEqual('![A image!](/media/test/cache/2e/35/2e3517d8aa949728b1ee8b26c5a7bbc4.jpg)', val)
 
 
 class TemplateTestCaseA(SimpleTestCaseBase):
-    @skip('evaluated as string')
-    def testModel(self):
+    def test_model(self):
         item = Item.objects.get(image='500x500.jpg')
         val = render_to_string('thumbnail1.html', {
             'item': item,
         }).strip()
-        self.assertEqual(val, u'<img style="margin:0px 0px 0px 0px" width="200" height="100">')
+        self.assertEqual(val, '<img style="margin:0px 0px 0px 0px" width="200" height="100">')
         val = render_to_string('thumbnail2.html', {
             'item': item,
         }).strip()
-        self.assertEqual(val, u'<img style="margin:0px 50px 0px 50px" width="100" height="100">')
+        self.assertEqual(val, '<img style="margin:0px 50px 0px 50px" width="100" height="100">')
 
     def test_nested(self):
         item = Item.objects.get(image='500x500.jpg')
         val = render_to_string('thumbnail6.html', {
             'item': item,
         }).strip()
-        self.assertEqual(val, ('<a href="/media/test/cache/ba/3c/ba3c94b7a6e2a4c8ec2c06b9d59cecb6.jpg">'
-                               '<img src="/media/test/cache/b1/12/b112f37693a6976afab6d934404a22ad.jpg" width="400" height="400">'
-                               '</a>'))
+        self.assertEqual(val, (
+            '<a href="/media/test/cache/ba/d7/bad785264867676a926566150f90f87c.jpg">'
+            '<img src="/media/test/cache/c6/7a/c67a64c3145f8834cd6770f6f80198c9.jpg" width="400" height="400">'
+            '</a>')
+        )
 
     def test_serialization_options(self):
         item = Item.objects.get(image='500x500.jpg')
+
         for j in range(0, 20):
             # we could be lucky...
             val0 = render_to_string('thumbnail7.html', {
@@ -367,11 +456,8 @@ class TemplateTestCaseA(SimpleTestCaseBase):
         m = re.search('Interlace: None', str(p.stdout.read()))
         self.assertEqual(bool(m), True)
 
-    @skip('stall')
     def test_orientation(self):
-        data_dir = pjoin(settings.MEDIA_ROOT, 'data')
-        shutil.copytree(settings.DATA_ROOT, data_dir)
-        ref = Image.open(pjoin(data_dir, '1_topleft.jpg'))
+        ref = Image.open(pjoin(DATA_DIR, '1_topleft.jpg'))
         top = ref.getpixel((14, 7))
         left = ref.getpixel((7, 14))
         engine = PILEngine()
@@ -383,12 +469,25 @@ class TemplateTestCaseA(SimpleTestCaseBase):
                 y = sum(y) / len(y)
             return abs(x - y)
 
-        for name in sorted(os.listdir(data_dir)):
+        data_images = (
+            '1_topleft.jpg',
+            '2_topright.jpg',
+            '3_bottomright.jpg',
+            '4_bottomleft.jpg',
+            '5_lefttop.jpg',
+            '6_righttop.jpg',
+            '7_rightbottom.jpg',
+            '8_leftbottom.jpg'
+        )
+
+        for name in data_images:
             th = self.backend.get_thumbnail('data/%s' % name, '30x30')
             im = engine.get_image(th)
+
             self.assertLess(epsilon(top, im.getpixel((14, 7))), 10)
             self.assertLess(epsilon(left, im.getpixel((7, 14))), 10)
             exif = im._getexif()
+
             if exif:
                 self.assertEqual(exif.get(0x0112), 1)
 
@@ -400,43 +499,43 @@ class TemplateTestCaseB(unittest.TestCase):
         except Exception:
             pass
 
-    @skip('stalling')
-    def testUrl(self):
+    def test_url(self):
         val = render_to_string('thumbnail3.html', {}).strip()
         self.assertEqual(val, '<img style="margin:0px 0px 0px 0px" width="20" height="20">')
 
-    def testPortrait(self):
+    def test_portrait(self):
         val = render_to_string('thumbnail4.html', {
             'source': 'http://dummyimage.com/120x100/',
             'dims': 'x66',
         }).strip()
-        self.assertEqual(val, '<img src="/media/test/cache/b4/dd/b4dd7e712e6db789b78fbe9bc474ef29.jpg" width="79" height="66" class="landscape">')
+        self.assertEqual(val,
+                         '<img src="/media/test/cache/7b/cd/7bcd20922c6750649f431df7c3cdbc5e.jpg" width="79" height="66" class="landscape">')
 
-    def testEmpty(self):
+    def test_empty(self):
         val = render_to_string('thumbnail5.html', {}).strip()
         self.assertEqual(val, '<p>empty</p>')
 
 
 class TemplateTestCaseClient(TestCase):
-    @skip("mailsending not working")
-    def testEmptyError(self):
-        with self.settings(THUMBNAIL_DEBUG=False):
+    def test_empty_error(self):
+
+        with override_custom_settings(settings, THUMBNAIL_DEBUG=False):
+            from django.core.mail import outbox
+
             client = Client()
             response = client.get('/thumbnail9.html')
-            self.assertEqual(response.content.strip(), '<p>empty</p>')
-            from django.core.mail import outbox
+            self.assertEqual(response.content.strip(), b'<p>empty</p>')
             self.assertEqual(outbox[0].subject, '[sorl-thumbnail] ERROR: /thumbnail9.html')
-            end = outbox[0].body.split('\n\n')[-2][-20:-1]
-            self.assertEqual(end, 'tests/media/invalid')
+
+            end = outbox[0].body.split('\n\n')[-2].split(':')[1].strip()
+
+            self.assertEqual(end, '[Errno 2] No such file or directory')
 
 
-class CropTestCase(unittest.TestCase):
+class CropTestCase(SimpleTestCaseBase):
     def setUp(self):
-        self.backend = get_module_class(settings.THUMBNAIL_BACKEND)()
-        self.engine = get_module_class(settings.THUMBNAIL_ENGINE)()
-        self.kvstore = get_module_class(settings.THUMBNAIL_KVSTORE)()
-        if not os.path.exists(settings.MEDIA_ROOT):
-            os.makedirs(settings.MEDIA_ROOT)
+        super(CropTestCase, self).setUp()
+
         # portrait
         name = 'portrait.jpg'
         fn = pjoin(settings.MEDIA_ROOT, name)
@@ -455,12 +554,13 @@ class CropTestCase(unittest.TestCase):
         self.landscape = ImageFile(Item.objects.get_or_create(image=name)[0].image)
         self.kvstore.delete(self.landscape)
 
-    def testPortraitCrop(self):
+    def test_portrait_crop(self):
         def mean_pixel(x, y):
             values = im.getpixel((x, y))
             if not isinstance(values, (tuple, list)):
                 values = [values]
             return sum(values) / len(values)
+
         for crop in ('center', '88% 50%', '50px'):
             th = self.backend.get_thumbnail(self.portrait, '100x100', crop=crop)
             engine = PILEngine()
@@ -470,6 +570,7 @@ class CropTestCase(unittest.TestCase):
             self.assertEqual(250 <= mean_pixel(50, 49) <= 255, True, mean_pixel(50, 49))
             self.assertEqual(mean_pixel(50, 55), 0)
             self.assertEqual(mean_pixel(50, 99), 0)
+
         for crop in ('top', '0%', '0px'):
             th = self.backend.get_thumbnail(self.portrait, '100x100', crop=crop)
             engine = PILEngine()
@@ -477,6 +578,7 @@ class CropTestCase(unittest.TestCase):
             for x in range(0, 99, 10):
                 for y in range(0, 99, 10):
                     self.assertEqual(250 < mean_pixel(x, y) <= 255, True)
+
         for crop in ('bottom', '100%', '100px'):
             th = self.backend.get_thumbnail(self.portrait, '100x100', crop=crop)
             engine = PILEngine()
@@ -485,12 +587,14 @@ class CropTestCase(unittest.TestCase):
                 for y in range(0, 99, 10):
                     self.assertEqual(0 <= mean_pixel(x, y) < 5, True)
 
-    def testLandscapeCrop(self):
+    def test_landscape_crop(self):
+
         def mean_pixel(x, y):
             values = im.getpixel((x, y))
             if not isinstance(values, (tuple, list)):
                 values = [values]
             return sum(values) / len(values)
+
         for crop in ('center', '50% 200%', '50px 700px'):
             th = self.backend.get_thumbnail(self.landscape, '100x100', crop=crop)
             engine = PILEngine()
@@ -500,6 +604,7 @@ class CropTestCase(unittest.TestCase):
             self.assertEqual(250 < mean_pixel(49, 50) <= 255, True)
             self.assertEqual(mean_pixel(55, 50), 0)
             self.assertEqual(mean_pixel(99, 50), 0)
+
         for crop in ('left', '0%', '0px'):
             th = self.backend.get_thumbnail(self.landscape, '100x100', crop=crop)
             engine = PILEngine()
@@ -507,6 +612,7 @@ class CropTestCase(unittest.TestCase):
             for x in range(0, 99, 10):
                 for y in range(0, 99, 10):
                     self.assertEqual(250 < mean_pixel(x, y) <= 255, True)
+
         for crop in ('right', '100%', '100px'):
             th = self.backend.get_thumbnail(self.landscape, '100x100', crop=crop)
             engine = PILEngine()
@@ -515,6 +621,27 @@ class CropTestCase(unittest.TestCase):
                 for y in range(0, 99, 10):
                     self.assertEqual(0 <= mean_pixel(x, y) < 5, True)
 
+    def test_smart_crop(self):
+        # TODO: Complete test for smart crop
+        thumb = self.backend.get_thumbnail(
+            '32x32',
+            'data/white_border.jpg',
+            crop='smart')
+
+    def test_crop_image_with_icc_profile(self):
+        name = 'data/icc_profile_test.jpg'
+        item, _ = Item.objects.get_or_create(image=name)
+
+        im = ImageFile(item.image)
+        th = self.backend.get_thumbnail(im, '100x100')
+
+        engine = PILEngine()
+
+        self.assertEqual(
+            engine.get_image(im).info.get('icc_profile'),
+            engine.get_image(th).info.get('icc_profile')
+        )
+
     def tearDown(self):
         shutil.rmtree(settings.MEDIA_ROOT)
 
@@ -522,12 +649,10 @@ class CropTestCase(unittest.TestCase):
 class DummyTestCase(TestCase):
     def setUp(self):
         self.backend = get_module_class(settings.THUMBNAIL_BACKEND)()
-        setattr(settings, 'THUMBNAIL_DUMMY', True)
-
-    def tearDown(self):
-        setattr(settings, 'THUMBNAIL_DUMMY', False)
 
     def test_dummy_tags(self):
+        settings.THUMBNAIL_DUMMY = True
+
         val = render_to_string('thumbnaild1.html', {
             'anything': 'AINO',
         }).strip()
@@ -540,9 +665,10 @@ class DummyTestCase(TestCase):
         }).strip()
         self.assertEqual(val, '<img src="http://dummyimage.com/600x400" width="600" height="400">')
 
+        settings.THUMBNAIL_DUMMY = False
+
 
 class ModelTestCase(SimpleTestCaseBase):
-    @skip("Skip due 100% cpu usage on running")
     def test_field1(self):
         self.kvstore.clear()
         item = Item.objects.get(image='100x100.jpg')
@@ -560,18 +686,22 @@ class BackendTest(SimpleTestCaseBase):
         im1 = Item.objects.get(image='100x100.jpg').image
         im2 = Item.objects.get(image='500x500.jpg').image
         default.kvstore.get_or_set(ImageFile(im1))
+
         # exists in kvstore and in storage
         self.assertTrue(bool(default.kvstore.get(ImageFile(im1))))
         self.assertTrue(ImageFile(im1).exists())
+
         # delete
         delete(im1)
         self.assertFalse(bool(default.kvstore.get(ImageFile(im1))))
         self.assertFalse(ImageFile(im1).exists())
 
         default.kvstore.get_or_set(ImageFile(im2))
+
         # exists in kvstore and in storage
         self.assertTrue(bool(default.kvstore.get(ImageFile(im2))))
         self.assertTrue(ImageFile(im2).exists())
+
         # delete
         delete(im2, delete_file=False)
         self.assertFalse(bool(default.kvstore.get(ImageFile(im2))))
@@ -582,19 +712,94 @@ class TestInputCase(unittest.TestCase):
     def setUp(self):
         if not os.path.exists(settings.MEDIA_ROOT):
             os.makedirs(settings.MEDIA_ROOT)
-        self.name = u'åäö.jpg'
+
+        self.name = 'åäö.jpg'
+
         fn = pjoin(settings.MEDIA_ROOT, self.name)
         im = Image.new('L', (666, 666))
         im.save(fn)
 
-    @skipIf(PY3, 'hash is different')
     def test_nonascii(self):
         # also test the get_thumbnail shortcut
         th = get_thumbnail(self.name, '200x200')
-        self.assertEqual(
-            th.url,
-            '/media/test/cache/2a/35/2a3533bac94f8ab92dabe2d964184a83.jpg'
-        )
+        hash_file = '/media/test/cache/99/45/9945ad3ee0397274de77abd37d5db7bb.jpg'
+        self.assertEqual(th.url, hash_file)
 
     def tearDown(self):
         shutil.rmtree(settings.MEDIA_ROOT)
+
+
+@skipIf(sys.platform.startswith("win"), "Can't easily count descriptors on windows")
+class TestDescriptors(unittest.TestCase):
+    """Make sure we're not leaving open descriptors on file exceptions"""
+    engine = None
+
+    def setUp(self):
+        self.engine = get_module_class(settings.THUMBNAIL_ENGINE)()
+
+    def test_no_source_get_image(self):
+        """If source image does not exists, properly close all file descriptors"""
+        source = ImageFile('nonexistent.jpeg')
+
+        with same_open_fd_count(self):
+            with self.assertRaises(IOError):
+                self.engine.get_image(source)
+
+    def test_is_valid_image(self):
+        with same_open_fd_count(self):
+            self.engine.is_valid_image(b'invalidbinaryimage.jpg')
+
+    @skipIf('pgmagick_engine' in settings.THUMBNAIL_ENGINE and sys.version_info.major == 2,
+            'No output has been received in the last 10 minutes, this potentially indicates something wrong with the build itself.')
+    def test_write(self):
+        with same_open_fd_count(self):
+            with self.assertRaises(Exception):
+                self.engine.write(image=self.engine.get_image(StringIO(b'xxx')),
+                                  options={'format': 'JPEG', 'quality': 90, 'image_info': {}},
+                                  thumbnail=ImageFile('whatever_thumb.jpg', default.storage))
+
+
+class CommandTests(SimpleTestCase):
+    def test_clear_action(self):
+        out = StringIO('')
+        management.call_command('thumbnail', 'clear', verbosity=1, stdout=out)
+        self.assertEqual(out.getvalue(), "Clear the Key Value Store ... [Done]\n")
+
+    def test_cleanup_action(self):
+        out = StringIO('')
+        management.call_command('thumbnail', 'cleanup', verbosity=1, stdout=out)
+        self.assertEqual(out.getvalue(), "Cleanup thumbnails ... [Done]\n")
+
+
+class FakeFile(object):
+    """
+    Used to test the _get_format method.
+    """
+
+    def __init__(self, name):
+        self.name = name
+
+
+@override_settings(THUMBNAIL_PRESERVE_FORMAT=True,
+                   THUMBNAIL_FORMAT='XXX')
+class PreserveFormatTest(TestCase):
+    def setUp(self):
+        self.backend = ThumbnailBackend()
+
+    def test_with_various_formats(self):
+        self.assertEqual(self.backend._get_format(FakeFile('foo.jpg')), 'JPEG')
+        self.assertEqual(self.backend._get_format(FakeFile('foo.jpeg')), 'JPEG')
+        self.assertEqual(self.backend._get_format(FakeFile('foo.png')), 'PNG')
+
+    def test_double_extension(self):
+        self.assertEqual(self.backend._get_format(FakeFile('foo.ext.jpg')), 'JPEG')
+
+    def test_that_capitalization_doesnt_matter(self):
+        self.assertEqual(self.backend._get_format(FakeFile('foo.PNG')), 'PNG')
+        self.assertEqual(self.backend._get_format(FakeFile('foo.JPG')), 'JPEG')
+
+    def test_fallback_format(self):
+        self.assertEqual(self.backend._get_format(FakeFile('foo.txt')), 'XXX')
+
+    def test_with_nonascii(self):
+        self.assertEqual(self.backend._get_format(FakeFile('你好.jpg')), 'JPEG')

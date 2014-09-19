@@ -1,12 +1,14 @@
-import re
+import logging
 
+import os
+import re
+from sorl.thumbnail.compat import string_type, text_type
 from sorl.thumbnail.conf import settings, defaults as default_settings
 from sorl.thumbnail.helpers import tokey, serialize
-from sorl.thumbnail.images import ImageFile
+from sorl.thumbnail.images import ImageFile, DummyImageFile
 from sorl.thumbnail import default
 from sorl.thumbnail.parsers import parse_geometry
 
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -40,22 +42,20 @@ class ThumbnailBackend(object):
         ('blur', 'THUMBNAIL_BLUR'),
     )
 
-    file_extension = lambda inst, file_: str(file_).split('.')[-1].lower()
+    def file_extension(self, file_):
+        return os.path.splitext(file_.name)[1].lower()
 
     def _get_format(self, file_):
         file_extension = self.file_extension(file_)
 
-        is_jpeg = re.match('jpg|jpeg', file_extension)
-        is_png = re.match('png', file_extension)
-
-        if is_jpeg:
-            format_ = 'JPEG'
-        elif is_png:
-            format_ = 'PNG'
+        if file_extension == '.jpg' or file_extension == '.jpeg':
+            return 'JPEG'
+        elif file_extension == '.png':
+            return 'PNG'
         else:
-            format_ = default_settings.THUMBNAIL_FORMAT
+            from django.conf import settings
 
-        return str(format_)
+            return getattr(settings, 'THUMBNAIL_FORMAT', default_settings.THUMBNAIL_FORMAT)
 
     def get_thumbnail(self, file_, geometry_string, **options):
         """
@@ -63,17 +63,22 @@ class ThumbnailBackend(object):
         options given. First it will try to get it from the key value store,
         secondly it will create it.
         """
-        logger.debug('Getting thumbnail for file [%s] at [%s]', file_,
+        logger.debug(text_type('Getting thumbnail for file [%s] at [%s]'), file_,
                      geometry_string)
-        source = ImageFile(file_)
+        if file_:
+            source = ImageFile(file_)
+        elif settings.THUMBNAIL_DUMMY:
+            return DummyImageFile(geometry_string)
+        else:
+            return None
 
         #preserve image filetype
         if settings.THUMBNAIL_PRESERVE_FORMAT:
-            self.default_options['format'] = self._get_format(file_)
+            options.setdefault('format', self._get_format(file_))
 
-        for key in self.default_options.keys():
-            if not key in options:
-                options.update({key: self.default_options[key]})
+        for key, value in self.default_options.items():
+            options.setdefault(key, value)
+
 
         # For the future I think it is better to add options only if they
         # differ from the default settings as below. This will ensure the same
@@ -94,18 +99,29 @@ class ThumbnailBackend(object):
             try:
                 source_image = default.engine.get_image(source)
             except IOError:
-                # if S3Storage says file doesn't exist remotely, don't try to
-                # create it, exit early
-                # Will return working empty image type; 404'd image
-                logger.warn('Remote file [%s] at [%s] does not exist', file_,
-                            geometry_string)
-                return thumbnail
-                # We might as well set the size since we have the image in memory
+                if settings.THUMBNAIL_DUMMY:
+                    return DummyImageFile(geometry_string)
+                else:
+                    # if S3Storage says file doesn't exist remotely, don't try to
+                    # create it and exit early.
+                    # Will return working empty image type; 404'd image
+                    logger.warn(text_type('Remote file [%s] at [%s] does not exist'), file_, geometry_string)
+                    return thumbnail
+
+            # We might as well set the size since we have the image in memory
+            image_info = default.engine.get_image_info(source_image)
+            options['image_info'] = image_info
             size = default.engine.get_image_size(source_image)
             source.set_size(size)
-            self._create_thumbnail(source_image, geometry_string, options,
-                                   thumbnail)
-            # If the thumbnail exists we don't create it, the other option is
+            try:
+                self._create_thumbnail(source_image, geometry_string, options,
+                                       thumbnail)
+                self._create_alternative_resolutions(source_image, geometry_string,
+                                                     options, thumbnail.name)
+            finally:
+                default.engine.cleanup(source_image)
+
+        # If the thumbnail exists we don't create it, the other option is
         # to delete and write but this could lead to race conditions so I
         # will just leave that out for now.
         default.kvstore.get_or_set(source)
@@ -127,7 +143,7 @@ class ThumbnailBackend(object):
         """
         Creates the thumbnail by using default.engine
         """
-        logger.debug('Creating thumbnail file [%s] at [%s] with [%s]',
+        logger.debug(text_type('Creating thumbnail file [%s] at [%s] with [%s]'),
                      thumbnail.name, geometry_string, options)
         ratio = default.engine.get_image_ratio(source_image, options)
         geometry = parse_geometry(geometry_string, ratio)
@@ -136,6 +152,38 @@ class ThumbnailBackend(object):
         # It's much cheaper to set the size here
         size = default.engine.get_image_size(image)
         thumbnail.set_size(size)
+
+    def _create_alternative_resolutions(self, source_image, geometry_string,
+                                        options, name):
+        """
+        Creates the thumbnail by using default.engine with multiple output
+        sizes.  Appends @<ratio>x to the file name.
+        """
+        ratio = default.engine.get_image_ratio(source_image, options)
+        geometry = parse_geometry(geometry_string, ratio)
+        file_name, dot_file_ext = os.path.splitext(name)
+
+        for resolution in settings.THUMBNAIL_ALTERNATIVE_RESOLUTIONS:
+            resolution_geometry = (int(geometry[0] * resolution), int(geometry[1] * resolution))
+            resolution_options = options.copy()
+            if 'crop' in options and isinstance(options['crop'], string_type):
+                crop = options['crop'].split(" ")
+                for i in range(len(crop)):
+                    s = re.match("(\d+)px", crop[i])
+                    if s:
+                        crop[i] = "%spx" % int(int(s.group(1)) * resolution)
+                resolution_options['crop'] = " ".join(crop)
+
+            image = default.engine.create(source_image, resolution_geometry, options)
+            thumbnail_name = '%(file_name)s%(suffix)s%(file_ext)s' % {
+                'file_name': file_name,
+                'suffix': '@%sx' % resolution,
+                'file_ext': dot_file_ext
+            }
+            thumbnail = ImageFile(thumbnail_name, default.storage)
+            default.engine.write(image, resolution_options, thumbnail)
+            size = default.engine.get_image_size(image)
+            thumbnail.set_size(size)
 
     def _get_thumbnail_filename(self, source, geometry_string, options):
         """
@@ -146,4 +194,3 @@ class ThumbnailBackend(object):
         path = '%s/%s/%s' % (key[:2], key[2:4], key)
         return '%s%s.%s' % (settings.THUMBNAIL_PREFIX, path,
                             EXTENSIONS[options['format']])
-

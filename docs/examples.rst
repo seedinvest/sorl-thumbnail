@@ -118,7 +118,7 @@ project with only small code changes::
 
 Admin examples
 ==============
-Recommended usage using ``sorl.thumbnail.admin.AdminImageMixin``::
+Recommended usage using ``sorl.thumbnail.admin.AdminImageMixin`` (note that this requires use of ``sorl.thumbnail.ImageField`` in your models as explained above)::
 
     # myapp/admin.py
     from django.contrib import admin
@@ -166,7 +166,7 @@ Easy to plugin solution example with little code to change::
 
 Low level API examples
 ======================
-How to get make a thumbnail in you python code::
+How to get make a thumbnail in your python code::
 
     from sorl.thumbnail import get_thumbnail
 

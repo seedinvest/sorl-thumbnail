@@ -53,13 +53,13 @@ if __name__ == '__main__':
         '--failfast',
         dest='failfast',
         action='store_true',
-        default=False,
+        default=True,
         help='Stop running the test suite after first failed test.')
 
     args = parser.parse_args()
 
     failures = runtests(
-        verbosity=1,
+        verbosity=2,
         interactive=args.interactive,
         failfast=args.failfast,
         settings_module=args.settings_module)

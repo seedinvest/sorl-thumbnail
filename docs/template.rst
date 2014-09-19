@@ -4,9 +4,9 @@ Template tags and filters
 
 .. highlight:: html+django
 
-Sorl-thumbnail comes with one template tag `thumbnail`_ and two filters:
-`is_portrait`_ and `margin`_. To use any of them in you templates you first
-need to load them::
+Sorl-thumbnail comes with one template tag `thumbnail`_ and three filters:
+`is_portrait`_, `margin`_ and `resolution`_. To use any of them in you
+templates you first need to load them::
 
     {% load thumbnail %}
 
@@ -215,7 +215,7 @@ Examples::
             <img src="{{ im.url }}">
         {% endthumbnail %}
     {% else %}
-        {% thumbnail item.image "100x200" crop="center" %}
+        {% thumbnail item.image "200x100" crop="center" %}
             <img src="{{ im.url }}">
         {% endthumbnail %}
     {% endif %}
@@ -249,3 +249,15 @@ outputs all values.
 
 .. _css background-position: http://www.w3.org/TR/CSS2/colors.html#propdef-background-position
 
+resolution
+==========
+Resolution is a filter for obtaining alternative resolution versions of the
+thumbnail.  Your provided resolution must be one of the
+``THUMBNAIL_ALTERNATIVE_RESOLUTIONS`` settings values (default: no alternative resolutions)
+
+For example, let's say you have an image ``item.image`` and you want to
+get the 2x DPI version of it.  You would simply write::
+
+    <div class="millxmill">
+        <img src="{{ item.image.url|resolution:"2x" }}">
+    </div>

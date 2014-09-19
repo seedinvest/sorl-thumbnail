@@ -1,17 +1,22 @@
+# -*- encoding: utf8 -*-
+from __future__ import unicode_literals
 import logging
+
+import sys
+
 import re
 import os
-import sys
 from functools import wraps
 from django.template import Library, Node, NodeList, TemplateSyntaxError
 from django.utils.encoding import smart_str
-
+from django.conf import settings
+from sorl.thumbnail.conf import settings as sorl_settings
 from sorl.thumbnail import default
-from sorl.thumbnail.conf import settings
 from sorl.thumbnail.images import ImageFile, DummyImageFile
 from sorl.thumbnail.parsers import parse_geometry
-from sorl.thumbnail.compat import text_type, string_type
+from sorl.thumbnail.compat import text_type
 from sorl.thumbnail.shortcuts import get_thumbnail
+
 
 register = Library()
 kw_pat = re.compile(r'^(?P<key>[\w]+)=(?P<value>.+)$')
@@ -29,10 +34,10 @@ def safe_filter(error_output=''):
         def wrapper(*args, **kwargs):
             try:
                 return f(*args, **kwargs)
-            except Exception:
-                if settings.THUMBNAIL_DEBUG:
+            except Exception as err:
+                if sorl_settings.THUMBNAIL_DEBUG:
                     raise
-                logger.error('Thumbnail filter failed:',
+                logger.error('Thumbnail filter failed: %s' % err.message,
                              exc_info=sys.exc_info())
                 return error_output
 
@@ -48,12 +53,35 @@ class ThumbnailNodeBase(Node):
     nodelist_empty = NodeList()
 
     def render(self, context):
+
         try:
             return self._render(context)
         except Exception:
-            if settings.THUMBNAIL_DEBUG:
+            if sorl_settings.THUMBNAIL_DEBUG:
                 raise
-            logger.error('Thumbnail tag failed:', exc_info=sys.exc_info())
+
+            error_message = 'Thumbnail tag failed'
+
+            if settings.TEMPLATE_DEBUG:
+                try:
+                    error_message_template = (
+                        "Thumbnail tag failed "
+                        "in template {template_name}, error at: "
+                        "{tag_text}"
+                    )
+                    template_origin, (position_start, position_end) = self.source
+                    template_text = template_origin.reload()
+                    tag_text = template_text[position_start:position_end]
+
+                    error_message = error_message_template.format(
+                        template_name=template_origin.name,
+                        tag_text=tag_text,
+                    )
+                except Exception:
+                    pass
+
+            logger.exception(error_message)
+
             return self.nodelist_empty.render(context)
 
     def _render(self, context):
@@ -67,8 +95,6 @@ class ThumbnailNode(ThumbnailNodeBase):
 
     def __init__(self, parser, token):
         bits = token.split_contents()
-        #if len(bits) < 5:
-        #    raise TemplateSyntaxError(self.error_msg)
         self.file_ = parser.compile_filter(bits[1])
         self.geometry = parser.compile_filter(bits[2])
         self.options = []
@@ -97,34 +123,19 @@ class ThumbnailNode(ThumbnailNodeBase):
 
     def _render(self, context):
         file_ = self.file_.resolve(context)
-        lazy_fill = settings.THUMBNAIL_LAZY_FILL_EMPTY
         geometry = self.geometry.resolve(context)
         options = {}
         for key, expr in self.options:
-            noresolve = {u'True': True, u'False': False, u'None': None}
+            noresolve = {'True': True, 'False': False, 'None': None}
             value = noresolve.get(text_type(expr), expr.resolve(context))
             if key == 'options':
                 options.update(value)
             else:
                 options[key] = value
 
-        if isinstance(file_, string_type):
-            path = file_
-            exists = re.search('^https?://', path) or os.path.exists(path)
-        else:
-            path = getattr(file_, 'path', None) or \
-                getattr(file_, 'name', None) or ''
-            exists = os.path.exists(path)
+        thumbnail = get_thumbnail(file_, geometry, **options)
 
-        if file_ and exists:
-            thumbnail = default.backend.get_thumbnail(
-                file_, geometry, **options
-            )
-        elif self.nodelist_empty:
-            return self.nodelist_empty.render(context)
-        elif settings.THUMBNAIL_DUMMY or lazy_fill:
-            thumbnail = DummyImageFile(geometry)
-        else:
+        if not thumbnail or (isinstance(thumbnail, DummyImageFile) and self.nodelist_empty):
             if self.nodelist_empty:
                 return self.nodelist_empty.render(context)
             else:
@@ -150,6 +161,15 @@ class ThumbnailNode(ThumbnailNodeBase):
             yield node
 
 
+@register.filter
+def resolution(file_, resolution_string):
+    """
+    A filter to return the URL for the provided resolution of the thumbnail.
+    """
+    filename, extension = os.path.splitext(file_)
+    return '%s@%s%s' % (filename, resolution_string, extension)
+
+
 @register.tag
 def thumbnail(parser, token):
     return ThumbnailNode(parser, token)
@@ -161,8 +181,8 @@ def is_portrait(file_):
     """
     A very handy filter to determine if an image is portrait or landscape.
     """
-    if settings.THUMBNAIL_DUMMY:
-        return settings.THUMBNAIL_DUMMY_RATIO < 1
+    if sorl_settings.THUMBNAIL_DUMMY:
+        return sorl_settings.THUMBNAIL_DUMMY_RATIO < 1
     if not file_:
         return False
     image_file = default.kvstore.get_or_set(ImageFile(file_))
@@ -175,22 +195,29 @@ def margin(file_, geometry_string):
     """
     Returns the calculated margin for an image and geometry
     """
-    if not file_ or settings.THUMBNAIL_DUMMY or isinstance(file_,
-                                                           DummyImageFile):
+
+    if not file_ or (sorl_settings.THUMBNAIL_DUMMY or isinstance(file_, DummyImageFile)):
         return 'auto'
+
     margin = [0, 0, 0, 0]
+
     image_file = default.kvstore.get_or_set(ImageFile(file_))
+
     x, y = parse_geometry(geometry_string, image_file.ratio)
     ex = x - image_file.x
     margin[3] = ex / 2
     margin[1] = ex / 2
+
     if ex % 2:
         margin[1] += 1
+
     ey = y - image_file.y
     margin[0] = ey / 2
     margin[2] = ey / 2
+
     if ey % 2:
         margin[2] += 1
+
     return ' '.join(['%dpx' % n for n in margin])
 
 
@@ -200,8 +227,9 @@ def background_margin(file_, geometry_string):
     """
     Returns the calculated margin for a background image and geometry
     """
-    if not file_ or settings.THUMBNAIL_DUMMY:
+    if not file_ or sorl_settings.THUMBNAIL_DUMMY:
         return 'auto'
+
     margin = [0, 0]
     image_file = default.kvstore.get_or_set(ImageFile(file_))
     x, y = parse_geometry(geometry_string, image_file.ratio)
@@ -209,6 +237,7 @@ def background_margin(file_, geometry_string):
     margin[0] = ex / 2
     ey = y - image_file.y
     margin[1] = ey / 2
+
     return ' '.join(['%spx' % n for n in margin])
 
 
@@ -218,24 +247,26 @@ def text_filter(regex_base, value):
     """
 
     regex = regex_base % {
-        're_cap': u'[a-zA-Z0-9\.\,:;/_ \(\)\-\!\?\"]+',
-        're_img': u'[a-zA-Z0-9\.:/_\-\% ]+'
+        're_cap': '[a-zA-Z0-9\.\,:;/_ \(\)\-\!\?\"]+',
+        're_img': '[a-zA-Z0-9\.:/_\-\% ]+'
     }
     images = re.findall(regex, value)
+
     for i in images:
         image = i[1]
-        im = get_thumbnail(image, str(settings.THUMBNAIL_FILTER_WIDTH))
+        im = get_thumbnail(image, str(sorl_settings.THUMBNAIL_FILTER_WIDTH))
         value = value.replace(image, im.url)
+
     return value
 
 
 @safe_filter(error_output='auto')
 @register.filter
 def markdown_thumbnails(value):
-    return text_filter(u'!\[(%(re_cap)s)?\][ ]?\((%(re_img)s)\)', value)
+    return text_filter('!\[(%(re_cap)s)?\][ ]?\((%(re_img)s)\)', value)
 
 
 @safe_filter(error_output='auto')
 @register.filter
 def html_thumbnails(value):
-    return text_filter(u'<img(?: alt="(%(re_cap)s)?")? src="(%(re_img)s)"', value)
+    return text_filter('<img(?: alt="(%(re_cap)s)?")? src="(%(re_img)s)"', value)

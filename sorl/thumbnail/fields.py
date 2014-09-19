@@ -1,4 +1,5 @@
-from __future__ import with_statement
+from __future__ import with_statement, unicode_literals
+
 from django.db import models
 from django.db.models import Q
 from django import forms
@@ -9,7 +10,7 @@ from sorl.thumbnail import default
 __all__ = ('ImageField', 'ImageFormField')
 
 
-class ImageField(models.FileField):
+class ImageField(models.ImageField):
     def delete_file(self, instance, sender, **kwargs):
         """
         Adds deletion of thumbnails and key value store references to the
@@ -45,10 +46,10 @@ class ImageField(models.FileField):
         return (cls_name, args, kwargs)
 
 
-class ImageFormField(forms.FileField):
+class ImageFormField(forms.ImageField):
     default_error_messages = {
-        'invalid_image': _(u"Upload a valid image. The file you uploaded was "
-                           u"either not an image or a corrupted image."),
+        'invalid_image': _("Upload a valid image. The file you uploaded was "
+                           "either not an image or a corrupted image."),
     }
 
     def to_python(self, data):

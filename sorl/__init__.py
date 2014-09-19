@@ -1,12 +1,14 @@
 # -*- encoding: utf8 -*-
+from __future__ import unicode_literals
+
 import logging
 
 __author__ = "Mikko Hellsing"
 __license__ = "BSD"
-__version__ = '12.0'
-__maintainer__ = u"Mario César Señoranis Ayala"
+__version__ = '11.12.1b'
+__maintainer__ = "Mario César Señoranis Ayala"
 __email__ = "mariocesar@creat1va.com"
-__status__ = "Production"
+__status__ = "Beta"
 
 
 class NullHandler(logging.Handler):
@@ -16,5 +18,3 @@ class NullHandler(logging.Handler):
 # Add a logging handler that does nothing to silence messages with no logger
 # configured
 logging.getLogger('sorl').addHandler(NullHandler())
-
-

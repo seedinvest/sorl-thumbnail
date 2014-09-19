@@ -1,10 +1,12 @@
-|travis| |pypi|
+|travis| |pypi| |coveralls|
 
 Thumbnails for Django.
 
 Features at a glance
 ====================
 
+- Support for Django 1.4, 1.5 and 1.6
+- Python 3 support (for Django 1.5 and Django 1.6)
 - Storage support
 - Pluggable Engine support for `Pillow`_, `ImageMagick`_, `PIL`_, `Wand`_ and `pgmagick`_
 - Pluggable Key Value Store support (cached db, redis)
@@ -19,6 +21,23 @@ Features at a glance
 - Alternative resolutions versions of a thumbnail
 
 Read more in `the documentation (latest version) <http://sorl-thumbnail.rtfd.org/>`_
+
+Developers
+==========
+
+Feel free to create a new Pull request if you want to propose a new feature. If you need development support
+or want to discuss with other developers join us in the channel #sorl-thumnbnail at freenode.net or Gitter.
+
+- IRC Channel: irc://irc.freenode.net/#sorl-thumbnail
+   
+- Gitter: https://gitter.im/mariocesar/sorl-thumbnail
+
+Support
+=======
+
+If you need help using sorl-thumbnail browse http://stackoverflow.com/questions/tagged/sorl-thumbnail
+or posts your questions with the `sorl-thumbnail` tag.
+
 
 How to Use
 ==========
@@ -99,6 +118,9 @@ See more examples in the section `Low level API examples`_ in the Documentation
     :target: https://travis-ci.org/mariocesar/sorl-thumbnail
 .. |pypi| image:: https://badge.fury.io/py/sorl-thumbnail.png
     :target: http://badge.fury.io/py/sorl-thumbnail
+.. |coveralls| image:: https://coveralls.io/repos/mariocesar/sorl-thumbnail/badge.png?branch=master
+    :target: https://coveralls.io/r/mariocesar/sorl-thumbnail?branch=master
+
 
 .. _`Pillow`: http://pillow.readthedocs.org/en/latest/
 .. _`ImageMagick`: http://www.imagemagick.org/script/index.php

@@ -73,7 +73,7 @@ class Engine(EngineBase):
         image.crop(geometry)
         return image
 
-    def _get_raw_data(self, image, format_, quality, progressive=False):
+    def _get_raw_data(self, image, format_, quality, image_info=None, progressive=False):
         image.magick(format_.encode('utf8'))
         image.quality(quality)
         if format_ == 'JPEG' and progressive:
@@ -81,4 +81,3 @@ class Engine(EngineBase):
         blob = Blob()
         image.write(blob)
         return get_blob_data(blob)
-
