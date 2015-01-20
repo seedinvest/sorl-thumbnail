@@ -31,7 +31,7 @@ class Engine(EngineBase):
 
         args = settings.THUMBNAIL_CONVERT.split(' ')
         args.append(image['source'] + '[0]')
-
+        
         for k in image['options']:
             v = image['options'][k]
             args.append('-%s' % k)
@@ -165,6 +165,7 @@ class Engine(EngineBase):
         return image
 
     def _blur(self, image, blur):
+        image['options']['channel'] = 'RGBA'
         image['options']['blur'] = "%sx%s" % (settings.THUMBNAIL_BLUR, blur)
         return image
 
