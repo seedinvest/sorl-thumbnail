@@ -49,6 +49,16 @@ class Engine(EngineBase):
         if settings.THUMBNAIL_FLATTEN and not flatten == "off":
             args.append('-flatten')
 
+        strip = getattr(settings, 'THUMBNAIL_STRIP', False)
+        if strip:
+            args.append('-strip')
+
+        interlace = getattr(settings, 'THUMBNAIL_INTERLACE', None)
+
+        if interlace:
+            args.append('-interlace')
+            args.append(interlace)
+
         suffix = '.%s' % EXTENSIONS[options['format']]
 
         with NamedTemporaryFile(suffix=suffix, mode='rb') as fp:
