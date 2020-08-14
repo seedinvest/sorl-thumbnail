@@ -5,7 +5,7 @@ import os
 
 import subprocess
 
-from django.utils.datastructures import SortedDict
+from collections import OrderedDict
 from django.utils.encoding import smart_str
 from sorl.thumbnail.base import EXTENSIONS
 from sorl.thumbnail.conf import settings
@@ -82,7 +82,7 @@ class Engine(EngineBase):
         """
         with NamedTemporaryFile(mode='wb', delete=False) as fp:
             fp.write(source.read())
-        return {'source': fp.name, 'options': SortedDict(), 'size': None}
+        return {'source': fp.name, 'options': OrderedDict(), 'size': None}
 
     def get_image_size(self, image):
         """
